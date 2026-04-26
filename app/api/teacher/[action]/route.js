@@ -1,89 +1,49 @@
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { setConfigs, getAllConfig } from '@/lib/db';
-import { getAllStudents, addStudent, removeStudent, resetStudentPortfolio, getStudentByName } from '@/lib/students';
-
+import { getAllStudents } from '@/lib/students';
+import { db } from '@/lib/db';
 const TEACHER_EMAIL = process.env.TEACHER_EMAIL;
 
 export async function POST(request, { params }) {
   const session = await getServerSession(authOptions);
-  if (session?.user?.email !== TEACHER_EMAIL)
-    return Response.json({ error: 'Teacher only' }, { status: 403 });
-
+  if (session?.user?.email !== TEACHER_EMAIL) return Response.json({ error: 'Teacher only' }, { status: 403 });
   const action = params.action;
   let body = {};
   try { body = await request.json(); } catch {}
 
   switch (action) {
-
-    // ── Market Controls ──────────────────────────────────────────
     case 'freeze':
-      await setConfigs({
-        MARKET_FREEZE:        '1',
-        MARKET_FREEZE_REASON: body.reason || 'Market temporarily closed',
-        MARKET_FREEZE_UNTIL:  body.minutes
-          ? new Date(Date.now() + body.minutes * 60000).toISOString()
-          : '',
-      });
+      await setConfigs({ MARKET_FREEZE: '1', MARKET_FREEZE_REASON: body.reason || 'Market temporarily closed', MARKET_FREEZE_UNTIL: body.minutes ? new Date(Date.now() + body.minutes * 60000).toISOString() : '' });
       return Response.json({ success: true, message: '🔒 Market frozen' });
-
     case 'unfreeze':
       await setConfigs({ MARKET_FREEZE: '0', MARKET_FREEZE_REASON: '', MARKET_FREEZE_UNTIL: '' });
       return Response.json({ success: true, message: '✅ Market open' });
-
     case 'bull-run/start':
-      await setConfigs({
-        BULL_RUN_ACTIVE:     '1',
-        BULL_RUN_MULTIPLIER: String(body.multiplier || 2),
-      });
+      await setConfigs({ BULL_RUN_ACTIVE: '1', BULL_RUN_MULTIPLIER: String(body.multiplier || 2) });
       return Response.json({ success: true, message: `🐂 Bull run started (${body.multiplier || 2}×)` });
-
     case 'bull-run/stop':
       await setConfigs({ BULL_RUN_ACTIVE: '0' });
       return Response.json({ success: true, message: '⏹ Bull run ended' });
-
     case 'flash-sale/start': {
-      if (!body.coin)
-        return Response.json({ error: 'Coin is required' }, { status: 400 });
-      const factor = 1 - ((body.discountPct || 20) / 100);
-      const until  = new Date(Date.now() + (body.minutes || 30) * 60000).toISOString();
-      await setConfigs({
-        FLASH_SALE_COIN:   body.coin.toUpperCase(),
-        FLASH_SALE_FACTOR: String(factor),
-        FLASH_SALE_UNTIL:  until,
-      });
-      return Response.json({ success: true, message: `⚡ Flash sale: ${body.coin.toUpperCase()} ${body.discountPct || 20}% off` });
+      if (!body.coin) return Response.json({ error: 'Coin required' }, { status: 400 });
+      await setConfigs({ FLASH_SALE_COIN: body.coin.toUpperCase(), FLASH_SALE_FACTOR: String(1 - (body.discountPct || 20) / 100), FLASH_SALE_UNTIL: new Date(Date.now() + (body.minutes || 30) * 60000).toISOString() });
+      return Response.json({ success: true, message: `⚡ Flash sale: ${body.coin} ${body.discountPct || 20}% off` });
     }
-
     case 'flash-sale/stop':
       await setConfigs({ FLASH_SALE_COIN: '', FLASH_SALE_FACTOR: '', FLASH_SALE_UNTIL: '' });
       return Response.json({ success: true, message: '⏹ Flash sale ended' });
-
-    // ── Simulation ───────────────────────────────────────────────
     case 'pause':
-      await setConfigs({
-        SIM_PAUSED:           '1',
-        MARKET_FREEZE:        '1',
-        MARKET_FREEZE_REASON: '⏸ Simulation paused — class discussion in progress',
-      });
-      return Response.json({ success: true, message: '⏸ Simulation paused' });
-
+      await setConfigs({ SIM_PAUSED: '1', MARKET_FREEZE: '1', MARKET_FREEZE_REASON: '⏸ Simulation paused' });
+      return Response.json({ success: true, message: '⏸ Paused' });
     case 'resume':
       await setConfigs({ SIM_PAUSED: '0', MARKET_FREEZE: '0', MARKET_FREEZE_REASON: '' });
-      return Response.json({ success: true, message: '▶ Simulation resumed' });
-
+      return Response.json({ success: true, message: '▶ Resumed' });
     case 'end':
-      await setConfigs({
-        SIM_PAUSED:           '1',
-        MARKET_FREEZE:        '1',
-        MARKET_FREEZE_REASON: '🏁 Simulation has ended. Thanks for playing!',
-      });
-      return Response.json({ success: true, message: '🏁 Simulation ended' });
-
-    // ── Headlines ────────────────────────────────────────────────
+      await setConfigs({ SIM_PAUSED: '1', MARKET_FREEZE: '1', MARKET_FREEZE_REASON: '🏁 Simulation ended' });
+      return Response.json({ success: true, message: '🏁 Ended' });
     case 'post-headline': {
-      if (!body.headline)
-        return Response.json({ error: 'Headline is required' }, { status: 400 });
+      if (!body.headline) return Response.json({ error: 'Headline required' }, { status: 400 });
       const cfg = await getAllConfig();
       let history = [];
       try { history = JSON.parse(cfg.HEADLINE_HISTORY || '[]'); } catch {}
@@ -92,55 +52,38 @@ export async function POST(request, { params }) {
       await setConfigs({ HEADLINE_HISTORY: JSON.stringify(history) });
       return Response.json({ success: true, message: '📰 Headline posted' });
     }
-
     case 'clear-headlines':
       await setConfigs({ HEADLINE_HISTORY: '[]' });
-      return Response.json({ success: true, message: '🗑 Headlines cleared' });
-
-    // ── Fee Override ─────────────────────────────────────────────
-    case 'set-fee': {
-      const pct = parseFloat(body.feePct);
-      if (isNaN(pct) || pct < 0 || pct > 100)
-        return Response.json({ error: 'Invalid fee percentage' }, { status: 400 });
-      await setConfigs({ TRADE_FEE_OVERRIDE: String(pct / 100) });
-      return Response.json({ success: true, message: `💸 Fee set to ${pct}%` });
-    }
-
-    case 'reset-fee':
-      await setConfigs({ TRADE_FEE_OVERRIDE: '' });
-      return Response.json({ success: true, message: '✅ Fee reset to default' });
-
-    // ── Student Management ───────────────────────────────────────
+      return Response.json({ success: true, message: '🗑 Cleared' });
     case 'add-student': {
-      if (!body.name || !body.email)
-        return Response.json({ error: 'Name and email are required' }, { status: 400 });
-      const cfg2    = await getAllConfig();
-      const seed    = parseFloat(cfg2.SEED_MONEY) || 10000;
-      const student = await addStudent({ name: body.name, email: body.email, seedMoney: seed });
+      if (!body.name || !body.email || !body.classId) return Response.json({ error: 'name, email, classId required' }, { status: 400 });
+      const { data: cls } = await db.from('classes').select('seed_money').eq('id', body.classId).single();
+      let student;
+      const { data: existing } = await db.from('students').select('*').eq('email', body.email.toLowerCase()).single();
+      if (existing) { student = existing; }
+      else {
+        const { data: ns } = await db.from('students').insert({ name: body.name, email: body.email.toLowerCase() }).select().single();
+        student = ns;
+      }
+      await db.from('class_students').upsert({ class_id: body.classId, student_id: student.id }, { onConflict: 'class_id,student_id' });
+      await db.from('portfolios').upsert({ student_id: student.id, class_id: body.classId, cash: parseFloat(cls?.seed_money || 10000), fees_paid: 0 }, { onConflict: 'student_id,class_id' });
       return Response.json({ success: true, message: `✅ ${body.name} added`, student });
     }
-
-    case 'remove-student': {
-      if (!body.studentId)
-        return Response.json({ error: 'studentId is required' }, { status: 400 });
-      await removeStudent(body.studentId);
+    case 'remove-student':
+      if (!body.studentId || !body.classId) return Response.json({ error: 'studentId and classId required' }, { status: 400 });
+      await db.from('class_students').delete().eq('student_id', body.studentId).eq('class_id', body.classId);
       return Response.json({ success: true, message: '✅ Student removed' });
-    }
-
     case 'reset-student': {
-      if (!body.studentId)
-        return Response.json({ error: 'studentId is required' }, { status: 400 });
-      const cfg3 = await getAllConfig();
-      const seed = parseFloat(cfg3.SEED_MONEY) || 10000;
-      await resetStudentPortfolio(body.studentId, seed);
-      return Response.json({ success: true, message: '✅ Student portfolio reset' });
+      if (!body.studentId || !body.classId) return Response.json({ error: 'studentId and classId required' }, { status: 400 });
+      const { data: cls2 } = await db.from('classes').select('seed_money').eq('id', body.classId).single();
+      await Promise.all([
+        db.from('portfolios').update({ cash: parseFloat(cls2?.seed_money || 10000), fees_paid: 0 }).eq('student_id', body.studentId).eq('class_id', body.classId),
+        db.from('holdings').delete().eq('student_id', body.studentId).eq('class_id', body.classId),
+        db.from('trades').delete().eq('student_id', body.studentId).eq('class_id', body.classId),
+        db.from('snapshots').delete().eq('student_id', body.studentId).eq('class_id', body.classId),
+      ]);
+      return Response.json({ success: true, message: '✅ Reset' });
     }
-
-    case 'get-students': {
-      const students = await getAllStudents();
-      return Response.json(students);
-    }
-
     default:
       return Response.json({ error: `Unknown action: ${action}` }, { status: 400 });
   }
